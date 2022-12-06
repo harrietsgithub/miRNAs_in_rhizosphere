@@ -1,0 +1,6 @@
+#SampleID	Compartment	Plant
+HI.4536.002.NEBNext_Index_4.B1	Rhizosphere	Brachypodium
+HI.4536.002.NEBNext_Index_7.1	Unplanted_soil	Unplanted
+HI.4536.002.NEBNext_Index_6.B3	Rhizosphere	Brachypodium
+HI.4536.002.NEBNext_Index_8.2	Unplanted_soil	Unplanted
+HI.4536.002.NEBNext_Index_9.3	Unplanted_soil	Unplanted
