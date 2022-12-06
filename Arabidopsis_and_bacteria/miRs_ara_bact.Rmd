@@ -1,0 +1,246 @@
+---
+title: "miRs_ara"
+author: "Harriet"
+date: "25/02/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+The aim of this experiment is to analyse the miRNA composition of the rhizosphere of Arabidopsis thaliana. There is 3 rhizosphere samples and 3 unplanted soil samples (in "phylo_prelim"). This code was used to analyse the RNA sequences found inside bacteria from the rhizosphere or unplanted soils (in "phylo_bact"). Results from our Canadian lab were also analysed (in "phylo_canada").
+
+Raw counts were transformed into a BIOM1 file : in .xlsx table, all cells were formatted to "Number" with zero decimals and the file was saved as a .txt (Tabulation), then this file was uploaded to Galaxy and converted from tabular to BIOM (OTU table). This table was downloaded and used as an initial data file.
+
+Import data (raw counts in BIOM1 file) and associate metadata to create a phyloSeq object.
+
+```{r}
+library(phyloseq)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(vegan)
+library(readr)
+
+biom_file<-import_biom("C:/Users/hmiddleton/Dropbox/Projet_Mutants_miPEPs_miRNA/Harriet/miRs_rhizo_bact_exosomes/miRs_arabido/mir_ara_brut_95.biom1")
+
+sample<- data.frame(fread("C:/Users/hmiddleton/Dropbox/Projet_Mutants_miPEPs_miRNA/Harriet/miRs_rhizo_bact_exosomes/miRs_arabido/mapping_file_95.txt", sep="\t"), check.names=F)
+sample=sample_data(sample)
+
+rownames(sample)<-sample$`#SampleID`
+phylo<-merge_phyloseq(biom_file,sample)
+phylo
+
+# Create separate phyloseq objects for each experiment #
+phylo_canada <- subset_samples(phylo, Experiment=="No.Added.Nitrogen")
+phylo_bact <- subset_samples(phylo, Experiment=="Virginie_bacteries")
+phylo_prelim <- subset_samples(phylo, Experiment=="Preliminary.exp")
+
+# Create joint data phyloseq objects for common analyses #
+
+phylo_BJ <- merge_phyloseq(phylo_canada, phylo_bact)
+phylo_BP <- merge_phyloseq(phylo_prelim, phylo_bact)
+
+# GIVE A SPECIFIC ORDER FOR VENN DIAGRAMS  #
+correct.order_BJ <- c("bact_unplanted_soil", "bact_rhizo", "Rhizosphere", "Bulk.Soil")
+sample_data(phylo_BJ)$Compartment <- factor(sample_data(phylo_BJ)$Compartment, levels = correct.order_BJ)
+levels(get_variable(phylo_BJ, "Compartment"))
+
+correct.order_BP <- c("bact_unplanted_soil", "bact_rhizo", "Rhizosphere", "Unplanted_soil")
+sample_data(phylo_BP)$Compartment <- factor(sample_data(phylo_BP)$Compartment, levels = correct.order_BP)
+levels(get_variable(phylo_BP, "Compartment"))
+
+correct.order <- c("Rhizosphere", "Unplanted_soil")
+sample_data(phylo_prelim)$Compartment <- factor(sample_data(phylo_prelim)$Compartment, levels = correct.order)
+levels(get_variable(phylo_prelim, "Compartment"))
+
+correct.order <- c("Rhizosphere", "Bulk.Soil", "Unplanted_soil")
+sample_data(phylo_canada)$Compartment <- factor(sample_data(phylo_canada)$Compartment, levels = correct.order)
+levels(get_variable(phylo_canada, "Compartment"))
+
+```
+
+Nice theme to add to plots
+```{r}
+niceTheme <- theme(
+    axis.text.x = element_blank(),
+    axis.title.x=element_blank(),
+        axis.ticks.x=element_blank(),
+    axis.text.y = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    strip.text = element_text(size = 10), strip.background = element_rect(colour = "black", fill = "white"),
+  legend.position="right",panel.background = element_rect(fill = "white",colour="grey"),panel.grid.major = element_line(colour = "white"))
+
+```
+
+
+Filtration step: keep only microRNAs with at least 1 read
+
+```{r}
+phylo_filtered = filter_taxa(phylo_prelim, function(x) sum(x >= 1)>= (1), TRUE)
+phylo_filtered 
+OTU_table_phylo_filtered = otu_table(phylo_filtered)
+
+```
+
+```{r, fig.width = 10, fig.height = 7}
+library(DESeq2) # The DESeq2 package uses the raw OTU/ASV table (non rarefied phyloseq) and calculates a negative binomial GLM for each OTU/ASV. The Wald test was used for statistics.
+
+#Convert phyloseq object into a DESeqDataSet object with dispersion estimates using "Compartment" as the main factor
+ds2 <- phyloseq_to_deseq2(phylo_filtered, ~ Compartment) 
+
+#Specify your reference group, or else it will use alphabetical order
+ds2$Compartment <- relevel(ds2$Compartment, ref = "Unplanted_soil")
+
+#In our data, there are samples without any reads at all (unplanted_soil samples), this can be an issue for DESEq if it cannot calculate the geometric mean. So to counter this issue, we calculate a zero-tolerant geometric mean, prior to estimating size factors.
+
+gm_mean = function(x, na.rm=TRUE){exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}
+geoMeans = apply(counts(ds2), 1, gm_mean)
+ds2= estimateSizeFactors(ds2, geoMeans = geoMeans)
+
+dds <- DESeq(ds2, test="Wald", fitType="parametric")
+
+# To ensure the fit type is correct, calculate the residuals between the fit and real dispersion (Median Absolute Dispersion) of each dds with a different type.
+residual <- mcols(dds)$dispGeneEst - mcols(dds)$dispFit
+mad(residual, na.rm=TRUE) #5,41
+
+# Test "local" type
+dds_local <- DESeq(ds2, test="Wald", fitType="local")
+residual_local <- mcols(dds_local)$dispGeneEst - mcols(dds_local)$dispFit
+mad(residual_local, na.rm=TRUE) #13,88
+
+# Parametric type fits best
+
+# Prepare a table showing the comparison of log2FoldChange between the "treated" and "untreated" group
+res <- results(dds, cooksCutoff = FALSE, contrast = c("Compartment","Rhizosphere","Unplanted_soil")) 
+
+# Manually calculate adjusted p-value with Benjamini-Hochberg method
+res$padj_BH <- p.adjust(res$pvalue, method = "BH")
+res_threshold <- res[res$padj_BH < 0.05 , ] 
+res_order = res_threshold[order(res_threshold$padj_BH, na.last=NA), ]
+sigtab <- res_order
+sigtab = cbind(as(sigtab, "data.frame"), as(otu_table(phylo_filtered)[rownames(sigtab), ], "matrix"))
+dim(sigtab)
+
+# If you want to represent ALL miRNAs, not just the ones above the optimal threshold, manually calculate p.adj
+res$p.adj.man <- p.adjust(res$pvalue, method="BH")
+
+vplot=res
+vplot = cbind(as(vplot, "data.frame"), as(otu_table(phylo_filtered)[rownames(vplot), ], "matrix"))
+dim(vplot)
+
+vplot$diffexpressed[vplot$p.adj.man < 0.05] <- "Significant"
+vplot$diffexpressed[vplot$p.adj.man > 0.05] <- "Not significant"
+vplot$diffexpressed <- factor(vplot$diffexpressed, levels=c("Significant", "Not significant"), labels=c("Significant", "Not significant"))
+
+mycolors <- c("aquamarine2", "grey")
+names(mycolors) <- c("Significant", "Not significant")
+
+vplot$delabel<-row.names(vplot)
+vplot$delabel <- NA
+vplot$delabel[vplot$diffexpressed != "Not significant"] <- row.names(vplot)[vplot$diffexpressed != "Not significant"] 
+
+## Tip to improve names of miRNAs ##
+tmp <- do.call(rbind, strsplit(vplot$delabel, "_", fixed=TRUE))[,1]
+vplot$delabel <- do.call(rbind, strsplit(tmp, "h-", fixed=TRUE))[,2]
+
+
+library(ggrepel)
+volcano_plot<-ggplot(data=vplot, aes(x=log2FoldChange, y=-log10(p.adj.man), col=diffexpressed, label=delabel)) +  geom_point() + 
+        theme_minimal() +
+        geom_label_repel() +
+        scale_color_manual(values = mycolors) +
+        geom_hline(yintercept=-log10(0.05), col="darkgrey") +
+        geom_vline(xintercept=0, col="darkgrey")
+
+vp <- volcano_plot + theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "darkgrey"))
+vp <- vp + labs(x="log2(FoldChange)", y="-log10(adjusted p-value)") + niceTheme
+
+vp
+
+## Prepare a table with the significant differentially expressed genes ##
+
+
+alpha = 0.05
+sigtab = res_order[which(res_order$padj < alpha),]
+sigtab = cbind(as(sigtab, "data.frame"), as(otu_table(phylo_filtered)[rownames(sigtab), ], "matrix"))
+dim(sigtab)
+
+write.table(sigtab, 'sigtab_ara_DESEQ.txt')
+```
+
+
+```{r}
+## Prepare boxplots to show difference in expression of major DEGs ##
+library(matrixStats)
+library(ggplot2)
+library(reshape2)
+
+# Normalised counts using DESEq
+normalized_counts <- as.data.frame(counts(dds, normalized=TRUE))
+normalized_counts$cluster <- rownames(normalized_counts)
+normalized_counts <- normalized_counts[, c(ncol(normalized_counts), 1:(ncol(normalized_counts)-1))]  # changes field order
+rownames(normalized_counts) <- NULL
+
+# Filtration of the most abundant miRNAs
+res_threshold <- vplot[vplot$p.adj.man < 0.05, ] 
+most_abd_mirna <- rownames(res_threshold)  
+
+
+# Define the two conditions
+
+bact_ara <- c("NS.1454.001.NEBNext_S13.Ara2_050619", "NS.1454.001.NEBNext_S04.Ara1_020320",
+              "NS.1454.001.NEBNext_S05.Ara2_020320", "NS.1454.002.NEBNext_S06.Ara3_020320",
+              "NS.1454.001.NEBNext_S12.Ara1_050619", "NS.1454.001.NEBNext_S14.Ara3_050619",
+              "NS.1454.002.NEBNext_S09.Ara1_042920", "NS.1454.002.NEBNext_S10.Ara2_042920")
+
+bact_ctrl <- c("NS.1454.001.NEBNext_S03.Sol3_020320", "NS.1454.001.NEBNext_S11.Sol_050619",
+               "NS.1454.001.NEBNext_S02.Sol2_020320", "NS.1454.002.NEBNext_S01.Sol1_020320",
+               "NS.1454.002.NEBNext_S07.Sol1_042920", "NS.1454.002.NEBNext_S08.Sol2_042920")
+
+soil <- c("HI.4536.002.NEBNext_Index_7.1",	"HI.4536.002.NEBNext_Index_8.2",	"HI.4536.002.NEBNext_Index_9.3")
+rhizo <- c("HI.4536.002.NEBNext_Index_3.A3",	"HI.4536.002.NEBNext_Index_2.A2",	"HI.4536.002.NEBNext_Index_1.A1")
+
+# Display the boxplot
+# 1) Filtering most abundant miRNA
+top_normalized <- normalized_counts[normalized_counts$cluster %in% most_abd_mirna, ]
+dim(top_normalized)
+
+# 2) Reshapes the dataframe
+top_normalized <- melt(top_normalized, id.vars = 1)
+dim(top_normalized)
+
+# 3) Renames the libraries (replicates) into "rhizosphere" or "soil"
+top_normalized$condition = "Unplanted soil"
+top_normalized$condition[top_normalized$variable %in% rhizo] <- "Rhizosphere"
+top_normalized$condition <- factor(top_normalized$condition)
+str(top_normalized)
+
+# 4) Splits the miRNA names
+c_split <- do.call(rbind, strsplit(top_normalized$cluster, "_", fixed=TRUE))[,1]
+top_normalized$cluster <- do.call(rbind, strsplit(c_split, "h-", fixed=TRUE))[,2]
+
+# 5) Orders by cluster and condition
+top_normalized <- top_normalized[order(top_normalized$cluster, top_normalized$condition), ]
+rownames(top_normalized) = NULL
+head(top_normalized)
+
+mycolors <- c("75eec5ff","ff66008d")
+names(mycolors) <- c("Rhizosphere", "Unplanted soil")
+scale_color_manual(values = c("75eec5ff","ff66008d"))
+
+# 6) Displays the boxplot
+boxplot <- ggplot(top_normalized, aes(x=cluster, y=value, fill=condition)) +
+  geom_boxplot() +
+  geom_point(size=2, shape=21, position=position_jitterdodge()) +
+  facet_wrap( ~ cluster, scales="free") +
+  theme(strip.text=element_blank(), legend.position=c(0.90, 0.1), legend.text=element_text(size=12)) +  # remove title of all individual boxplot
+  labs(x="miRNA", y="Normalised counts", fill=element_blank())
+boxplot
+boxplot + niceTheme + scale_fill_manual(values = c("Rhizosphere"="aquamarine2","Unplanted soil"="sienna1"))
+
+```
+`
+
